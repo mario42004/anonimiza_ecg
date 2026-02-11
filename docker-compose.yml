@@ -1,0 +1,14 @@
+version: "3.9"
+
+services:
+  cardio_ecg_app:
+    build: .
+    container_name: cardio_ecg_app
+    ports:
+      - "8501:8501"
+    environment:
+      - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+    volumes:
+      - ./pdf_inputs:/app/pdf_inputs
+      - ./ecg_outputs:/app/ecg_outputs
+    restart: unless-stopped

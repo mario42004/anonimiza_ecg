@@ -1,0 +1,7 @@
+*.png
+*.pdf
+*.csv
+
+# Local data dirs
+pdf_inputs/
+ecg_outputs/
