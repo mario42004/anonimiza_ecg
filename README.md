@@ -6,7 +6,7 @@ Herramienta para procesar PDFs clínicos de ECG: recorta el panel del trazado, a
 - Detecta el panel ECG (zona rosa) y lo recorta.
 - Genera un ID anónimo y guarda los paneles con nombre `panel_<id>.png`.
 - Extrae el encabezado del PDF/imagen y aplica OCR.
-- Genera un CSV con metadatos (`rapidaim_id`, `panel_id`, `patient_id`, `panel_filename`, `source_file`, `raw_data`, `paper_speed`, `amplitude`, `freq_prefilter`).
+- Genera un CSV con metadatos (`rapidaim_id`, `patient_id`, `panel_id`, `panel_filename`, `source_file`, `paper_speed`, `amplitude`, `freq_prefilter`, `raw_data`).
 - Exporta archivos auxiliares por documento (máscaras, header, TSV, JSON).
 
 ## Requisitos
