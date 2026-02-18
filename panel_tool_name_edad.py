@@ -259,8 +259,8 @@ def process_single_document(
 
     # Generar ID único y mover el panel a la carpeta global
     unique_id_raw = generate_unique_id()
-    panel_id = f"_{unique_id_raw}"
-    new_panel_name = f"panel_{unique_id_raw}.png"
+    panel_id = f"_{unique_id_raw}_{rapidaim_id}"
+    new_panel_name = f"panel_{unique_id_raw}_{rapidaim_id}.png"
     new_panel_path = panels_dir / new_panel_name
     ecg_panel_path.rename(new_panel_path)
 
