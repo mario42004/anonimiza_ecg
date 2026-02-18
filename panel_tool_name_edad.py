@@ -9,9 +9,10 @@ import csv
 import tempfile
 from pathlib import Path
 import zipfile
-import datetime
+import time
 import re
 import getpass  # para detectar /media/<usuario>
+import subprocess
 
 import streamlit as st
 from extract_all import run_pipeline
@@ -34,50 +35,53 @@ def make_zip_from_map(files_map):
 
 
 def generate_unique_id() -> str:
-    """Genera un ID único global basado en timestamp UTC."""
-    now = datetime.datetime.utcnow()
-    return now.strftime("%Y%m%d_%H%M%S_%f")
+    """Genera un ID único usando timestamp Unix (epoch) en nanosegundos."""
+    return str(time.time_ns())
 
 
-def _extract_first_after_key(key_word: str, text: str) -> str:
+def pdf_extract_text(pdf_path: Path) -> str:
     """
-    Busca la primera aparición de una palabra clave (nombre, edad, sexo, peso)
-    y devuelve TODO lo que viene después, hasta coma o salto de línea.
-
-    Soporta cosas como:
-      - 'Nombre: Mario'
-      - 'Nombre Mario'
-      - 'Nombre- Mario'
-      - 'Edad: 45 años'
-      - 'Edad 45'
+    Extrae texto embebido de un PDF usando pdftotext (poppler-utils).
+    Devuelve string vacío si falla.
     """
-    pattern = rf"\b{key_word}\b\s*[:\-]?\s*([^\n\r,]+)"
-    m = re.search(pattern, text, flags=re.IGNORECASE)
-    if not m:
+    try:
+        res = subprocess.run(
+            ["pdftotext", str(pdf_path), "-"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return res.stdout or ""
+    except Exception:
         return ""
-    value = m.group(1).strip()
-    return value
+
+
+def extract_footer_fields_from_text(text: str) -> dict:
+    """
+    Extrae velocidad de papel, amplitud y frecuencia de muestreo desde texto.
+    Soporta patrones tipo: 25mm/s, 10mm/mV, 150Hz.
+    """
+    def _find(pattern: str) -> str:
+        m = re.search(pattern, text, flags=re.IGNORECASE)
+        return m.group(1).strip() if m else ""
+
+    paper_speed = _find(r"(\d+(?:\.\d+)?)\s*mm\s*/\s*s")
+    amplitude = _find(r"(\d+(?:\.\d+)?)\s*mm\s*/\s*mV")
+    freq_prefilter = _find(r"(\d+(?:\.\d+)?)\s*Hz")
+
+    return {
+        "paper_speed": paper_speed,
+        "amplitude": amplitude,
+        "freq_prefilter": freq_prefilter,
+    }
 
 
 def parse_header_to_fields(header_path: Path) -> dict:
     """
-    Lee el archivo *_header_text.txt y devuelve SOLO campos normalizados:
-
-      - nombre
-      - edad
-      - sexo
-      - peso
-      - raw_data   (todo el texto del header aplanado)
-
-    Para los campos clave:
-      - Toma lo que sigue a la palabra (Nombre, Edad, Sexo, Peso),
-        con o sin ':', por ejemplo 'Edad 45 años' o 'Edad: 45'.
+    Lee el archivo *_header_text.txt y devuelve solo:
+      - raw_data (todo el texto del header aplanado)
     """
     base_fields = {
-        "nombre": "",
-        "edad": "",
-        "sexo": "",
-        "peso": "",
         "raw_data": "",
     }
 
@@ -90,17 +94,7 @@ def parse_header_to_fields(header_path: Path) -> dict:
     lines = [ln.strip() for ln in raw_text.splitlines() if ln.strip()]
     flat_text = " | ".join(lines)
 
-    # Extracción normalizada a partir de la palabra clave
-    nombre = _extract_first_after_key("nombre", raw_text)
-    edad   = _extract_first_after_key("edad", raw_text)
-    sexo   = _extract_first_after_key("sexo", raw_text)
-    peso   = _extract_first_after_key("peso", raw_text)
-
     fields = {
-        "nombre": nombre,
-        "edad": edad,      # puede ser '45 años', '45', 'indeterminada', etc.
-        "sexo": sexo,
-        "peso": peso,
         "raw_data": flat_text,
     }
 
@@ -134,6 +128,42 @@ def update_metadata_csv(csv_path: Path, new_row: dict):
         writer.writerows(existing_rows)
 
 
+def load_existing_csv_state(csv_path: Path):
+    """
+    Lee el CSV existente y devuelve:
+      - max_rapidaim_id: mayor rapidaim_id encontrado (0 si no hay)
+      - source_files: conjunto de source_file ya registrados
+    """
+    max_rapidaim_id = 0
+    source_files = set()
+
+    if not csv_path.exists():
+        return max_rapidaim_id, source_files
+
+    with csv_path.open("r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            src = (row.get("source_file") or "").strip()
+            if src:
+                source_files.add(src)
+
+            rid = (row.get("rapidaim_id") or "").strip()
+            if rid.isdigit():
+                max_rapidaim_id = max(max_rapidaim_id, int(rid))
+
+    return max_rapidaim_id, source_files
+
+
+def extract_patient_id_from_filename(original_name: str) -> str:
+    """
+    Extrae patient_id como el texto antes del primer underscore en el nombre.
+    Ejemplo: 12345_abc_def.pdf -> 12345
+    """
+    filename = Path(original_name).name
+    stem = Path(filename).stem
+    return stem.split("_", 1)[0].strip()
+
+
 def pdf_to_image(pdf_path: Path) -> Path:
     """
     Convierte la PRIMERA página de un PDF a una imagen PNG temporal
@@ -160,6 +190,8 @@ def process_single_document(
     header_min_height: int,
     lang: str,
     csv_path: Path,
+    rapidaim_id: int,
+    patient_id: str,
 ):
     """
     Procesa un único documento (PDF o imagen):
@@ -174,10 +206,14 @@ def process_single_document(
     doc_out_dir = out_root_dir / Path(original_name).stem
     doc_out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Si el origen es PDF, convertir a imagen antes de llamar a run_pipeline
+    # Si el origen es PDF, extraer texto embebido y convertir a imagen antes de llamar a run_pipeline
     src_for_pipeline = src_path
+    footer_fields = {"paper_speed": "", "amplitude": "", "freq_prefilter": ""}
     if src_path.suffix.lower() == ".pdf":
         try:
+            embedded_text = pdf_extract_text(src_path)
+            if embedded_text:
+                footer_fields = extract_footer_fields_from_text(embedded_text)
             src_for_pipeline = pdf_to_image(src_path)
         except Exception as e:
             st.error(f"Error convirtiendo PDF a imagen para {original_name}: {e}")
@@ -213,20 +249,22 @@ def process_single_document(
     new_panel_path = panels_dir / new_panel_name
     ecg_panel_path.rename(new_panel_path)
 
-    # Parsear header — devuelve nombre, edad, sexo, peso, raw_data
+    # Parsear header — devuelve raw_data
     header_fields = parse_header_to_fields(header_txt_path)
 
     # Fila de metadatos para CSV
     row = {
+        "rapidaim_id": rapidaim_id,
         "panel_id": unique_id,
+        "patient_id": patient_id,
         "panel_filename": new_panel_name,
-        "panel_relpath": str(new_panel_path.relative_to(out_root_dir)),  # p.ej. "panels/panel_xxx.png"
         "source_file": original_name,
     }
     row.update(header_fields)
+    row.update(footer_fields)
 
     # Redundancia defensiva: asegurar claves normalizadas
-    for k in ("nombre", "edad", "sexo", "peso", "raw_data"):
+    for k in ("raw_data", "paper_speed", "amplitude", "freq_prefilter"):
         row.setdefault(k, "")
 
     # Actualizar CSV
@@ -355,9 +393,20 @@ csv_path = out_root_dir / "ecg_panels_metadata.csv"
 if docs_to_process:
     if st.button("🚀 Ejecutar extracción para TODOS los documentos"):
         results_summary = []
+        duplicate_source_files = []
+        failed_files = []
+        max_existing_rapidaim_id, known_source_files = load_existing_csv_state(csv_path)
+        next_rapidaim_id = max_existing_rapidaim_id + 1
+
         with st.spinner("Procesando documentos..."):
             for idx, (doc_path, original_name) in enumerate(docs_to_process, start=1):
                 st.write(f"Procesando ({idx}/{len(docs_to_process)}): {original_name}")
+                if original_name in known_source_files:
+                    duplicate_source_files.append(original_name)
+                    st.warning(f"Duplicado detectado (source_file ya existe): {original_name}. Se omite del CSV.")
+                    continue
+
+                patient_id = extract_patient_id_from_filename(original_name)
                 res = process_single_document(
                     src_path=doc_path,
                     original_name=original_name,
@@ -368,11 +417,30 @@ if docs_to_process:
                     header_min_height=header_min_height,
                     lang=lang,
                     csv_path=csv_path,
+                    rapidaim_id=next_rapidaim_id,
+                    patient_id=patient_id,
                 )
                 if res is not None:
                     results_summary.append(res)
+                    known_source_files.add(original_name)
+                    next_rapidaim_id += 1
+                else:
+                    failed_files.append(original_name)
 
         st.success("✅ Procesamiento batch completado.")
+
+        st.subheader("📋 Reporte de ejecución")
+        st.write(f"Total recibidos: {len(docs_to_process)}")
+        st.write(f"Agregados al CSV: {len(results_summary)}")
+        st.write(f"Omitidos por source_file duplicado: {len(duplicate_source_files)}")
+        st.write(f"Fallidos por error de procesamiento: {len(failed_files)}")
+
+        if duplicate_source_files:
+            st.error("Se detectaron source_file repetidos. No fueron añadidos al CSV.")
+            st.write("Duplicados:")
+            st.write(duplicate_source_files)
+        else:
+            st.success("No se detectaron source_file repetidos.")
 
         if results_summary:
             st.subheader("Ejemplos de paneles generados")
@@ -408,4 +476,3 @@ if docs_to_process:
             )
 else:
     st.info("👆 Sube archivos o indica una carpeta de PDFs para comenzar el análisis.")
-
