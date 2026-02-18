@@ -120,7 +120,21 @@ def update_metadata_csv(csv_path: Path, new_row: dict):
     fieldnames = set()
     for row in existing_rows:
         fieldnames.update(row.keys())
-    fieldnames = sorted(list(fieldnames))
+
+    preferred_order = [
+        "rapidaim_id",
+        "patient_id",
+        "panel_id",
+        "panel_filename",
+        "source_file",
+        "paper_speed",
+        "amplitude",
+        "freq_prefilter",
+        "raw_data",
+    ]
+    ordered_present = [k for k in preferred_order if k in fieldnames]
+    remaining = sorted([k for k in fieldnames if k not in preferred_order])
+    fieldnames = ordered_present + remaining
 
     with csv_path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -244,8 +258,9 @@ def process_single_document(
     panels_dir.mkdir(parents=True, exist_ok=True)
 
     # Generar ID único y mover el panel a la carpeta global
-    unique_id = generate_unique_id()
-    new_panel_name = f"panel_{unique_id}.png"
+    unique_id_raw = generate_unique_id()
+    panel_id = f"_{unique_id_raw}"
+    new_panel_name = f"panel_{unique_id_raw}.png"
     new_panel_path = panels_dir / new_panel_name
     ecg_panel_path.rename(new_panel_path)
 
@@ -255,7 +270,7 @@ def process_single_document(
     # Fila de metadatos para CSV
     row = {
         "rapidaim_id": rapidaim_id,
-        "panel_id": unique_id,
+        "panel_id": panel_id,
         "patient_id": patient_id,
         "panel_filename": new_panel_name,
         "source_file": original_name,
@@ -271,7 +286,7 @@ def process_single_document(
     update_metadata_csv(csv_path, row)
 
     return {
-        "panel_id": unique_id,
+        "panel_id": panel_id,
         "panel_path": new_panel_path,
         "source_file": original_name,
         "header_fields": header_fields,
